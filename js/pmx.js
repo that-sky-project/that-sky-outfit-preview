@@ -107,7 +107,8 @@ async function exportPMX() {
     let mIdx = matOf.get(key);
     if (mIdx === undefined) {
       mIdx = mats.length;
-      mats.push({ name: 'mat_' + matIdx, r: c[0], g: c[1], b: c[2], a: 1, tex: texFile, triCount: 0 });
+      const mOpacity = (typeof expIsTrans === 'function' && expIsTrans(mesh)) ? expOpacity(mesh) : 1;
+      mats.push({ name: 'mat_' + matIdx, r: c[0], g: c[1], b: c[2], a: mOpacity, tex: texFile, triCount: 0 });
       matOf.set(key, mIdx);
       matIdx++;
     }

@@ -51,6 +51,12 @@ const SKY_FS = `
 uniform float uDesaturate;
 uniform int uForceDesat;
   uniform float uExposure;
+  uniform float uEmissive;  // 自发光强度（透明/闪光斗篷：游戏内发光斗篷如星月、光丝、玻璃）；0=不发光
+  uniform float uTime;      // 全局时间（星光闪烁）
+  uniform float uSparkle;   // 星光开关（AP16 蝶翼系列：屏幕空间闪烁光点）
+  uniform float uFlowTrail;  // 流动笔触光效强度（星月项链等霓虹道具）；0=不流动
+  uniform float uFlowSpeed;  // 流动速度
+  uniform vec3 uFlowColor;   // 流动光带颜色（蓝黄渐变）
   uniform int uColorOn;      // 全局上色开关：0=白模(仅光照)，1=正常贴图/颜色/染色
   uniform float uToneDesat;  // 整体轻微降饱和（0=不变），让色调更柔和不刺眼
   uniform vec3 uClayColor;   // 白模底色（浅灰黏土，避免纯白过曝顶死）
@@ -60,6 +66,9 @@ uniform int uForceDesat;
   // 我们输出走 LinearSRGBColorSpace（不自动编码），故必须在此手动 lin2srgb。
   vec3 softClip(vec3 c) {
     c *= uExposure;
+    // 2018 复古 Tonemap0 末段：Reinhard² 压缩 (c/(c+0.25))² —— 高光柔和过曝、暗部缓抬，
+    // 参考 sky-shader-reverse-engineering（TGC 光照 8 年同源，差异只在 tonemap）。
+    c = (c / (c + 0.25)) * (c / (c + 0.25));
     c = clamp(c, 0.0, 1.0);
     return mix(c * 12.92, 1.055 * pow(c, vec3(1.0/2.4)) - 0.055, step(0.0031308, c));
   }
@@ -163,10 +172,37 @@ uniform int uForceDesat;
     if (uHasVCol == 1) {
       base *= vColorV;
     }
+    // 渐变透明：发光/半透明斗篷（游戏内蝶翼/光丝/元素斗篷）用 fresnel 羽化边缘，
+    // 近似游戏 shader 中 noise+capeIntegrity 的渐变透明（角色部件无 uv3，无法采样噪声贴图）。
+    if (uEmissive > 0.01 && uOpacity < 0.99) {
+      float nv = max(dot(N, V), 0.0);
+      alpha *= mix(1.0, 0.45, pow(1.0 - nv, 3.0));
+    }
     // 「原始颜色」开关：直接显示 ramp/贴图原色，不做 HSV 染色
     if (uForceDesat == 1) {
       if (alpha < uAlphaTest) discard;
-      gl_FragColor = vec4(softClip(toneDesat(base) * lighting + gSpec), alpha);
+      vec3 lit0 = toneDesat(base) * lighting + gSpec;
+      lit0 += lit0 * uEmissive * (base * 0.8 + 0.2);
+      vec3 col0 = softClip(lit0);
+      if (uEmissive > 0.01) col0 += max(vec3(0.0), lit0 - 0.5) * uEmissive * 1.2;
+      if (uSparkle > 0.5) {
+        vec2 sp = gl_FragCoord.xy * 0.045;
+        vec2 sid = floor(sp);
+        vec2 sf = fract(sp) - 0.5;
+        float h2 = fract(sin(dot(sid, vec2(127.1, 311.7))) * 43758.5453);
+        float star2 = smoothstep(0.86, 0.95, h2) * smoothstep(0.35, 0.06, length(sf));
+        star2 *= 0.5 + 0.5 * sin(uTime * 3.2 + h2 * 6.2831);
+        col0 += vec3(star2) * 1.8;
+      }
+      if (uFlowTrail > 0.01) {
+        float ft = uTime * uFlowSpeed;
+        float band = sin(vUv.x * 10.0 - ft * 1.6) * 0.5 + 0.5;
+        float band2 = sin(vUv.y * 7.0 + ft * 1.1 + 1.7) * 0.5 + 0.5;
+        float trail = smoothstep(0.62, 1.0, band * band2);
+        trail *= 0.5 + 0.5 * sin(uTime * 2.4);
+        col0 += uFlowTrail * trail * uFlowColor;
+      }
+      gl_FragColor = vec4(col0, alpha);
       return;
     }
     // ── 染色：逐行对齐参考实现 ──
@@ -176,7 +212,28 @@ uniform int uForceDesat;
     vec3 hsvColor = hsv2rgb(uBaseHsv);
     if (uHasColorOverride == 1) {
       if (alpha < uAlphaTest) discard;
-      gl_FragColor = vec4(softClip(toneDesat(hsvColor) * lighting + gSpec), alpha);
+      vec3 lit0 = toneDesat(hsvColor) * lighting + gSpec;
+      lit0 += lit0 * uEmissive * (hsvColor * 0.8 + 0.2);
+      vec3 col0 = softClip(lit0);
+      if (uEmissive > 0.01) col0 += max(vec3(0.0), lit0 - 0.5) * uEmissive * 1.2;
+      if (uSparkle > 0.5) {
+        vec2 sp = gl_FragCoord.xy * 0.045;
+        vec2 sid = floor(sp);
+        vec2 sf = fract(sp) - 0.5;
+        float h2 = fract(sin(dot(sid, vec2(127.1, 311.7))) * 43758.5453);
+        float star2 = smoothstep(0.86, 0.95, h2) * smoothstep(0.35, 0.06, length(sf));
+        star2 *= 0.5 + 0.5 * sin(uTime * 3.2 + h2 * 6.2831);
+        col0 += vec3(star2) * 1.8;
+      }
+      if (uFlowTrail > 0.01) {
+        float ft = uTime * uFlowSpeed;
+        float band = sin(vUv.x * 10.0 - ft * 1.6) * 0.5 + 0.5;
+        float band2 = sin(vUv.y * 7.0 + ft * 1.1 + 1.7) * 0.5 + 0.5;
+        float trail = smoothstep(0.62, 1.0, band * band2);
+        trail *= 0.5 + 0.5 * sin(uTime * 2.4);
+        col0 += uFlowTrail * trail * uFlowColor;
+      }
+      gl_FragColor = vec4(col0, alpha);
       return;
     }
     base *= hsvColor;
@@ -186,7 +243,28 @@ uniform int uForceDesat;
       base = mix(base, vec3(g), clamp(uDesaturate, 0.0, 1.0));
     }
     if (alpha < uAlphaTest) discard;
-    gl_FragColor = vec4(softClip(toneDesat(base) * lighting + gSpec), alpha);
+    vec3 lit0 = toneDesat(base) * lighting + gSpec;
+    lit0 += lit0 * uEmissive * (base * 0.8 + 0.2);
+    vec3 col0 = softClip(lit0);
+    if (uEmissive > 0.01) col0 += max(vec3(0.0), lit0 - 0.5) * uEmissive * 1.2;
+    if (uSparkle > 0.5) {
+      vec2 sp = gl_FragCoord.xy * 0.045;
+      vec2 sid = floor(sp);
+      vec2 sf = fract(sp) - 0.5;
+      float h2 = fract(sin(dot(sid, vec2(127.1, 311.7))) * 43758.5453);
+      float star2 = smoothstep(0.86, 0.95, h2) * smoothstep(0.35, 0.06, length(sf));
+      star2 *= 0.5 + 0.5 * sin(uTime * 3.2 + h2 * 6.2831);
+      col0 += vec3(star2) * 1.8;
+    }
+    if (uFlowTrail > 0.01) {
+      float ft = uTime * uFlowSpeed;
+      float band = sin(vUv.x * 10.0 - ft * 1.6) * 0.5 + 0.5;
+      float band2 = sin(vUv.y * 7.0 + ft * 1.1 + 1.7) * 0.5 + 0.5;
+      float trail = smoothstep(0.62, 1.0, band * band2);
+      trail *= 0.5 + 0.5 * sin(uTime * 2.4);
+      col0 += uFlowTrail * trail * uFlowColor;
+    }
+    gl_FragColor = vec4(col0, alpha);
   }`;
 
 // ===== const SKY_VS_BODY =====
@@ -207,6 +285,14 @@ const SKY_VS_BODY = `
       pos = (boneMat * vec4(position, 1.0)).xyz;
       nrm = (boneMat * vec4(normal, 0.0)).xyz;
     #endif
+    if (uClothWave > 0.0001) {
+      // 布料随风飘动：相位沿 y 自上而下传播、多频叠加形成褶皱、阵风包络
+      float gust = 0.65 + 0.35 * sin(uTime * 0.45);
+      float ph = uTime * 1.6 - pos.y * 0.55;
+      float sway = (sin(ph) + 0.55 * sin(ph * 0.53 + pos.x * 1.3) + 0.3 * sin(ph * 1.7 + pos.z * 1.1)) * uClothWave * gust;
+      pos.x += sway;
+      pos.z += cos(ph * 0.75 + pos.z * 0.6) * uClothWave * gust * 0.4;
+    }
     vNormalW = normalize(normalMatrix * nrm);
     vUv = uv;
     #ifdef USE_UV13
@@ -251,6 +337,8 @@ function buildSkyVS(boneCount) {
     varying vec2 vUv1;
     varying vec2 vUv3;
   #endif
+  uniform float uTime;
+  uniform float uClothWave;   // 布料飘动幅度（斗篷待机时微风摆动）；0=静止
   #ifdef USE_SKINNING
     attribute vec4 boneIndices;
     attribute vec4 boneWeights;
@@ -286,8 +374,7 @@ function skyMaterial(opts) {
       uLightDir: { value: SKY_LIGHT_DIR },
       // 光照系数：降低环境光、加大方向光对比，让浮雕/凹凸的阴影显出来（原 ambient 0.46 太高把细节洗平）
       // 可被 opts 覆盖：地形是预烘焙自发光（顶点色即最终色），需高 ambient/低方向光避免二次压暗。
-      uAmbient: { value: Array.isArray(o.ambient) ? new THREE.Vector3(o.ambient[0], o.ambient[1], o.ambient[2]) : new THREE.Vector3(70 / 255, 70 / 255, 72 / 255) },
-      uKey: { value: Array.isArray(o.key) ? new THREE.Vector3(o.key[0], o.key[1], o.key[2]) : new THREE.Vector3(255 / 255, 255 / 255, 255 / 255) },
+      uAmbient: { value: Array.isArray(o.ambient) ? new THREE.Vector3(o.ambient[0], o.ambient[1], o.ambient[2]) : new THREE.Vector3(70 / 255, 70 / 255, 72 / 255) },      uKey: { value: Array.isArray(o.key) ? new THREE.Vector3(o.key[0], o.key[1], o.key[2]) : new THREE.Vector3(255 / 255, 255 / 255, 255 / 255) },
       uFill: { value: Array.isArray(o.fill) ? new THREE.Vector3(o.fill[0], o.fill[1], o.fill[2]) : new THREE.Vector3(150 / 255, 160 / 255, 176 / 255) },
       // 用原始归一化 RGB（Vector3），避免 THREE.Color 被 ColorManagement 自动转线性
       uBaseColor: { value: (() => { const c = o.color != null ? o.color : 0xffffff; return new THREE.Vector3(((c >> 16) & 255) / 255, ((c >> 8) & 255) / 255, (c & 255) / 255); })() },
@@ -311,6 +398,13 @@ function skyMaterial(opts) {
       uDesaturate: { value: o.desaturate != null ? o.desaturate : 0.0 },
       uForceDesat: { value: 0 },
       uExposure: { value: o.exposure != null ? o.exposure : 0.62 },
+      uEmissive: { value: o.emissive != null ? o.emissive : 0.0 },
+      uTime: { value: 0 },
+      uSparkle: { value: o.sparkle ? 1 : 0 },
+      uFlowTrail: { value: o.flowTrail != null ? o.flowTrail : 0 },
+      uClothWave: { value: o.clothWave != null ? o.clothWave : 0 },
+      uFlowSpeed: { value: o.flowSpeed != null ? o.flowSpeed : 1.0 },
+      uFlowColor: { value: new THREE.Color(o.flowColor || 0x8fc8ff) },
       uColorOn: { value: colorOn ? 1 : 0 },
       uToneDesat: { value: TONE_DESAT },
       uClayColor: { value: new THREE.Vector3(0.6, 0.6, 0.62) },
@@ -637,13 +731,95 @@ function findMeshEntryByName(meshName) {
 }
 
 // ===== function buildPartMaterial =====
-async function buildPartMaterial(def, skinning, boneCount) {
+async function buildPartMaterial(def, skinning, boneCount, extra) {
+  const o = extra || {};
   const difName = def.diffuseTex || '';
   const tex = await loadTexture(difName);
+  // diffuse（渐变带/纯色底）是权威漫反射纹理；attrib（uv1 AO）作光照图（仅带 uv1 的部件启用）。
+  const useMap = (tex && showTexture) ? tex : null;
   const dye = isDyeRamp(def.shader, def.diffuseTex);
   const hsv = { baseHsv: def.base_hsv || null, colorOverride: !!def.color_override };
-  return skyMaterial({ color: 0xffffff, map: (tex && showTexture) ? tex : null, side: THREE.DoubleSide, baseHsv: hsv.baseHsv, colorOverride: hsv.colorOverride, rampDye: dye, skinning: !!skinning, boneCount: boneCount || 0,
+  return skyMaterial({ color: 0xffffff, map: useMap, lightMap: o.lightMap && showTexture ? o.lightMap : null, side: THREE.DoubleSide, baseHsv: hsv.baseHsv, colorOverride: hsv.colorOverride, rampDye: dye, skinning: !!skinning, boneCount: boneCount || 0,
+    emissive: o.emissive != null ? o.emissive : 0.0, opacity: o.opacity != null ? o.opacity : 1.0, transparent: !!o.transparent, depthWrite: o.depthWrite != null ? o.depthWrite : true, sparkle: !!o.sparkle,
+    flowTrail: o.flowTrail, flowSpeed: o.flowSpeed, flowColor: o.flowColor, clothWave: o.clothWave,
     ambient: CHAR_AMBIENT, key: CHAR_KEY, fill: CHAR_FILL });
+}
+
+// ===== function skinPositionsFromGeo =====
+// 用给定骨骼矩阵（animMats，列主序 mat4 数组）把几何顶点蒙皮成新位置。
+// 用于生成固定姿态的影子替身（70 帧站姿）。
+function skinPositionsFromGeo(geo, animMats) {
+  const posAttr = geo.attributes.position;
+  const vs = posAttr.array;
+  const bi = geo.attributes.boneIndices ? geo.attributes.boneIndices.array : null;
+  const bw = geo.attributes.boneWeights ? geo.attributes.boneWeights.array : null;
+  const n = posAttr.count;
+  const out = new Float32Array(n * 3);
+  if (!bi || !bw) {
+    for (let i = 0; i < n * 3; i++) out[i] = vs[i];
+    return out;
+  }
+  for (let i = 0; i < n; i++) {
+    const vx = vs[i * 3], vy = vs[i * 3 + 1], vz = vs[i * 3 + 2];
+    let x = 0, y = 0, z = 0;
+    for (let k = 0; k < 4; k++) {
+      const idx = bi[i * 4 + k], w = bw[i * 4 + k];
+      if (!w) continue;
+      const o = idx * 16;
+      x += w * (animMats[o] * vx + animMats[o + 4] * vy + animMats[o + 8] * vz + animMats[o + 12]);
+      y += w * (animMats[o + 1] * vx + animMats[o + 5] * vy + animMats[o + 9] * vz + animMats[o + 13]);
+      z += w * (animMats[o + 2] * vx + animMats[o + 6] * vy + animMats[o + 10] * vz + animMats[o + 14]);
+    }
+    out[i * 3] = x; out[i * 3 + 1] = y; out[i * 3 + 2] = z;
+  }
+  return out;
+}
+
+// ===== function buildSkinDepthMaterial =====
+// 阴影 pass 默认用 Three 的 DepthMaterial，不认识骨骼纹理，导致阴影定格在绑定姿势（T-pose）。
+// 这里做一个与 skyMaterial 相同骨骼变换逻辑的深度材质，挂到 mesh.customDepthMaterial，
+// 阴影即随动画实时变化。uBoneTexture 必须与主材质共享同一 DataTexture（骨骼数据每帧写入）。
+function buildSkinDepthMaterial(boneN) {
+  const size = boneTexSizeFor(Math.max(1, boneN || 1));
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      uBoneTexture: { value: null },
+      uBoneTexSize: { value: size },
+    },
+    vertexShader: `
+      attribute vec4 boneIndices;
+      attribute vec4 boneWeights;
+      uniform sampler2D uBoneTexture;
+      uniform float uBoneTexSize;
+      mat4 getBoneMatrix(float i) {
+        float j = i * 4.0;
+        float x = mod(j, uBoneTexSize);
+        float y = floor(j / uBoneTexSize);
+        float dx = 1.0 / uBoneTexSize;
+        float dy = 1.0 / uBoneTexSize;
+        y = dy * (y + 0.5);
+        vec4 v1 = texture2D(uBoneTexture, vec2(dx * (x + 0.5), y));
+        vec4 v2 = texture2D(uBoneTexture, vec2(dx * (x + 1.5), y));
+        vec4 v3 = texture2D(uBoneTexture, vec2(dx * (x + 2.5), y));
+        vec4 v4 = texture2D(uBoneTexture, vec2(dx * (x + 3.5), y));
+        return mat4(v1, v2, v3, v4);
+      }
+      void main() {
+        mat4 boneMat =
+          getBoneMatrix(boneIndices.x) * boneWeights.x +
+          getBoneMatrix(boneIndices.y) * boneWeights.y +
+          getBoneMatrix(boneIndices.z) * boneWeights.z +
+          getBoneMatrix(boneIndices.w) * boneWeights.w;
+        if (boneWeights.x + boneWeights.y + boneWeights.z + boneWeights.w < 0.0001) boneMat = mat4(1.0);
+        vec4 pos = boneMat * vec4(position, 1.0);
+        gl_Position = projectionMatrix * modelViewMatrix * pos;
+      }
+    `,
+    fragmentShader: `void main() { gl_FragColor = vec4(1.0, 1.0, 1.0, 1.0); }`,
+    side: THREE.DoubleSide,
+    depthWrite: true,
+    depthTest: true,
+  });
 }
 
 // ===== function loadDressCharacter =====

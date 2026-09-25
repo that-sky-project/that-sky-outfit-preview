@@ -308,7 +308,16 @@ function expTexToCanvas(tex) {
   c.height = img.height || 1;
   const ctx = c.getContext('2d');
   const id = ctx.createImageData(c.width, c.height);
-  id.data.set(img.data);
+  const src = img.data;
+  if (src.length === c.width * c.height * 3) {
+    // 3 通道 RGB：补 alpha=255，保证导出 PNG 带透明通道
+    const dst = id.data;
+    for (let i = 0; i < src.length; i += 3) {
+      dst[i] = src[i]; dst[i + 1] = src[i + 1]; dst[i + 2] = src[i + 2]; dst[i + 3] = 255;
+    }
+  } else {
+    id.data.set(src.subarray ? src.subarray(0, id.data.length) : src);
+  }
   ctx.putImageData(id, 0, 0);
   return c;
 }
@@ -327,6 +336,19 @@ function expMatTex(mesh) {
   const u = mesh.material && mesh.material.uniforms;
   const tex = u && u.uTex ? u.uTex.value : null;
   return tex && tex.image && tex.image.data ? tex : null;
+}
+function expIsTrans(mesh) {
+  const mat = mesh && mesh.material;
+  if (!mat) return false;
+  if (mat.transparent === true) return true;
+  if (mat.uniforms && mat.uniforms.uOpacity && mat.uniforms.uOpacity.value < 0.99) return true;
+  return false;
+}
+function expOpacity(mesh) {
+  const mat = mesh && mesh.material;
+  if (mat && mat.uniforms && mat.uniforms.uOpacity) return mat.uniforms.uOpacity.value;
+  if (mat && typeof mat.opacity === 'number') return mat.opacity;
+  return 1;
 }
 
 /* ---------- 收集所有部件 ---------- */
@@ -477,6 +499,7 @@ async function exportOBJ() {
     vOff += b.vCount;
     const c = expMatColor(e.mesh);
     mtl += `newmtl mat_${i}\nKa 0.05 0.05 0.05\nKd ${expNum(c[0])} ${expNum(c[1])} ${expNum(c[2])}\nKs 0 0 0\nillum 2\n`;
+    if (expIsTrans(e.mesh)) mtl += `d ${expNum(expOpacity(e.mesh))}\nTr ${expNum(1 - expOpacity(e.mesh))}\n`;
     if (e.texFile) mtl += `map_Kd ${e.texFile.file}\n`;
     mtl += '\n';
   });
@@ -563,9 +586,11 @@ async function exportGLB() {
     // 材质
     const tex = expMatTex(mesh);
     const c = expMatColor(mesh);
-    let key = tex ? 't:' + tex.uuid : 'c:' + c.join(',');
+    const _tr = expIsTrans(mesh);
+    const _op = expOpacity(mesh);
+    let key = (tex ? 't:' + tex.uuid : 'c:' + c.join(',')) + (_tr ? ':tr' : '');
     if (!matIndex.has(key)) {
-      const pbr = { metallicFactor: 0, roughnessFactor: 1, baseColorFactor: [c[0], c[1], c[2], 1] };
+      const pbr = { metallicFactor: 0, roughnessFactor: 1, baseColorFactor: [c[0], c[1], c[2], _tr ? _op : 1] };
       if (tex) {
         if (!imgIndex.has(tex.uuid)) {
           const cv = expTexToCanvas(tex);
@@ -588,7 +613,7 @@ async function exportGLB() {
           pbr.baseColorTexture = { index: texIndex.get(tex.uuid) };
         }
       }
-      json.materials.push({ name: 'mat_' + mi, pbrMetallicRoughness: pbr, doubleSided: true, alphaMode: 'OPAQUE' });
+      json.materials.push({ name: 'mat_' + mi, pbrMetallicRoughness: pbr, doubleSided: true, alphaMode: _tr ? 'BLEND' : 'OPAQUE' });
       matIndex.set(key, json.materials.length - 1);
     }
     prim.material = matIndex.get(key);
@@ -744,9 +769,11 @@ async function exportGLBSkinned() {
   const addMaterial = async (mesh) => {
     const tex = expMatTex(mesh);
     const c = expMatColor(mesh);
-    const key = tex ? 't:' + tex.uuid : 'c:' + c.join(',');
+    const _tr = expIsTrans(mesh);
+    const _op = expOpacity(mesh);
+    const key = (tex ? 't:' + tex.uuid : 'c:' + c.join(',')) + (_tr ? ':tr' : '');
     if (matIndex.has(key)) return matIndex.get(key);
-    const pbr = { metallicFactor: 0, roughnessFactor: 1, baseColorFactor: [c[0], c[1], c[2], 1] };
+    const pbr = { metallicFactor: 0, roughnessFactor: 1, baseColorFactor: [c[0], c[1], c[2], _tr ? _op : 1] };
     if (tex) {
       if (!imgIndex.has(tex.uuid)) {
         const cv = expTexToCanvas(tex);
@@ -767,7 +794,7 @@ async function exportGLBSkinned() {
       }
       if (texIndex.has(tex.uuid)) pbr.baseColorTexture = { index: texIndex.get(tex.uuid) };
     }
-    json.materials.push({ name: 'mat_' + mi, pbrMetallicRoughness: pbr, doubleSided: true, alphaMode: 'OPAQUE' });
+    json.materials.push({ name: 'mat_' + mi, pbrMetallicRoughness: pbr, doubleSided: true, alphaMode: _tr ? 'BLEND' : 'OPAQUE' });
     matIndex.set(key, json.materials.length - 1);
     return json.materials.length - 1;
   };
